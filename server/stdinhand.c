@@ -3852,11 +3852,20 @@ bool load_command(struct connection *caller, const char *filename, bool check)
 
   {
     struct stat buf;
+    bool failure = FALSE;
 
-    /* does file exist? */
+    /* Does file exist? */
     if (fc_stat(arg, &buf) != 0) {
       log_error("Error loading savefile '%s': %s", arg,
                 fc_strerror(fc_get_errno()));
+      failure = TRUE;
+    } else if (!S_ISREG(buf.st_mode)) {
+      log_error("Error loading savefile '%s': %s", arg,
+                "not a file");
+      failure = TRUE;
+    }
+
+    if (failure) {
       cmd_reply(CMD_LOAD, caller, C_FAIL, _("Could not load savefile: %s"),
                 arg);
       dlsend_packet_game_load(game.est_connections, FALSE, arg);
@@ -5008,7 +5017,6 @@ static const char *lua_accessor(int i)
 static bool lua_command(struct connection *caller, char *arg, bool check,
                         int read_recursion)
 {
-  struct stat statbuf;
   const char extension[] = ".lua", *real_filename = nullptr;
   char luafile[4096], tilde_filename[4096];
   char *tokens[1], *luaarg = nullptr;
@@ -5141,7 +5149,7 @@ static bool lua_command(struct connection *caller, char *arg, bool check,
               _("Loading Freeciv script file '%s'."), real_filename);
 
     if (is_reg_file_for_access(real_filename, FALSE)
-        && !fc_stat(real_filename, &statbuf)) {
+        && !fc_stat(real_filename, nullptr)) {
       ret = script_server_do_file(caller, real_filename);
     } else {
       cmd_reply(CMD_LUA, caller, C_FAIL,
@@ -5154,7 +5162,7 @@ static bool lua_command(struct connection *caller, char *arg, bool check,
               _("Loading Freeciv script file '%s'."), real_filename);
 
     if (is_reg_file_for_access(real_filename, FALSE)
-        && !fc_stat(real_filename, &statbuf)) {
+        && !fc_stat(real_filename, nullptr)) {
       ret = script_server_unsafe_do_file(caller, real_filename);
     } else {
       cmd_reply(CMD_LUA, caller, C_FAIL,
