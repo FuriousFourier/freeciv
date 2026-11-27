@@ -287,6 +287,21 @@ static void recalculate_surrounders(void)
 }
 
 /**********************************************************************//**
+  Gives the tile the continent (or ocean, if 'nr' is negative) number 'nr'
+  and counts it in the size of that continent or ocean.
+**************************************************************************/
+static void assign_continent_tile(struct tile *ptile, int nr)
+{
+  tile_set_continent(ptile, nr);
+
+  if (nr < 0) {
+    wld.map.ocean_sizes[-nr]++;
+  } else {
+    wld.map.continent_sizes[nr]++;
+  }
+}
+
+/**********************************************************************//**
   Number this tile and nearby tiles with the specified continent number 'nr'.
   Due to the number of recursion for large maps a non-recursive algorithm is
   utilised.
@@ -309,8 +324,14 @@ static void assign_continent_flood(struct tile *ptile, bool is_land, int nr)
                 && T_UNKNOWN != pterrain
                 && XOR(is_land, terrain_type_terrain_class(pterrain) == TC_OCEAN));
 
-  /* Create tile list and insert the initial tile. */
+  /* Create tile list and insert the initial tile.
+   *
+   * Invariant: a tile is numbered at the moment it is added to the list,
+   * so a tile that already has a continent number is either done or
+   * waiting in the list. Either way it must not be added again, and that
+   * is all the check in the loop below needs to know. */
   tlist = tile_list_new();
+  assign_continent_tile(ptile, nr);
   tile_list_append(tlist, ptile);
 
   while (tile_list_size(tlist) > 0) {
@@ -327,22 +348,13 @@ static void assign_continent_flood(struct tile *ptile, bool is_land, int nr)
         continue;
       }
 
-      /* Add the tile to the list of tiles to check. */
-      if (!tile_list_search(tlist, ptile3)) {
-        tile_list_append(tlist, ptile3);
-      }
+      /* Number the tile and add it to the list of tiles to check. */
+      assign_continent_tile(ptile3, nr);
+      tile_list_append(tlist, ptile3);
     } adjc_iterate_end;
 
-    /* Set the continent data and remove the tile from the list. */
-    tile_set_continent(ptile2, nr);
+    /* This tile is done, remove it from the list. */
     tile_list_remove(tlist, ptile2);
-
-    /* Count the tile */
-    if (nr < 0) {
-      wld.map.ocean_sizes[-nr]++;
-    } else {
-      wld.map.continent_sizes[nr]++;
-    }
   }
 
   tile_list_destroy(tlist);

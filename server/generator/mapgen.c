@@ -115,6 +115,17 @@ static bool make_island(int islemass, int starters,
 struct river_map {
   struct dbv blocked;
   struct dbv ok;
+
+  /* Road-like extras that block a river: all those but the one the river
+   * is made of. */
+  bv_extras blocking_extras;
+
+  /* Tiles marked in 'ok', each once, in the order they were marked.
+   * Lets us apply or clear a river by touching only its own tiles
+   * instead of scanning the whole map. */
+  int *ok_list;
+  int ok_count;
+  int ok_alloc;
 };
 
 static int river_test_blocked(struct river_map *privermap,
@@ -552,19 +563,32 @@ static void make_terrains(void)
 }
 
 /**********************************************************************//**
+  Is the tile blocked for the river being made? That is the case if the
+  tile was marked blocked in make_river(), or if it has some other
+  road-like extra than the one the river is made of. The map doesn't change
+  while a river is being made, so the extras can be looked at directly.
+**************************************************************************/
+static bool river_is_blocked(const struct river_map *privermap,
+                             const struct tile *ptile)
+{
+  return dbv_isset(&privermap->blocked, tile_index(ptile))
+    || BV_CHECK_MASK(*tile_extras(ptile), privermap->blocking_extras);
+}
+
+/**********************************************************************//**
   Help function used in make_river(). See the help there.
 **************************************************************************/
 static int river_test_blocked(struct river_map *privermap,
                               struct tile *ptile,
                               struct extra_type *priver)
 {
-  if (dbv_isset(&privermap->blocked, tile_index(ptile))) {
+  if (river_is_blocked(privermap, ptile)) {
     return 1;
   }
 
   /* Any un-blocked? */
   cardinal_adjc_iterate(&(wld.map), ptile, ptile1) {
-    if (!dbv_isset(&privermap->blocked, tile_index(ptile1))) {
+    if (!river_is_blocked(privermap, ptile1)) {
       return 0;
     }
   } cardinal_adjc_iterate_end;
@@ -679,6 +703,50 @@ static void river_blockmark(struct river_map *privermap,
   cardinal_adjc_iterate(&(wld.map), ptile, ptile1) {
     dbv_set(&privermap->blocked, tile_index(ptile1));
   } cardinal_adjc_iterate_end;
+}
+
+/**********************************************************************//**
+  Marks a tile as part of the river being made. Each tile is recorded
+  once in ok_list.
+**************************************************************************/
+static void river_ok_set(struct river_map *privermap, int tindex)
+{
+  if (dbv_isset(&privermap->ok, tindex)) {
+    return;
+  }
+
+  dbv_set(&privermap->ok, tindex);
+
+  if (privermap->ok_count >= privermap->ok_alloc) {
+    privermap->ok_alloc = privermap->ok_alloc > 0 ? privermap->ok_alloc * 2 : 256;
+    privermap->ok_list = fc_realloc(privermap->ok_list,
+                                    privermap->ok_alloc * sizeof(int));
+  }
+  privermap->ok_list[privermap->ok_count++] = tindex;
+}
+
+/**********************************************************************//**
+  Forgets the river tiles marked so far (clears only the bits we set).
+**************************************************************************/
+static void river_ok_clear(struct river_map *privermap)
+{
+  int i;
+
+  for (i = 0; i < privermap->ok_count; i++) {
+    dbv_clr(&privermap->ok, privermap->ok_list[i]);
+  }
+  privermap->ok_count = 0;
+}
+
+/**********************************************************************//**
+  qsort() comparison function for tile indices (ascending).
+**************************************************************************/
+static int river_index_cmp(const void *a, const void *b)
+{
+  int ia = *(const int *) a;
+  int ib = *(const int *) b;
+
+  return (ia > ib) - (ia < ib);
 }
 
 struct test_func {
@@ -803,7 +871,7 @@ static bool make_river(struct river_map *privermap, struct tile *ptile,
 
   while (TRUE) {
     /* Mark the current tile as river. */
-    dbv_set(&privermap->ok, tile_index(ptile));
+    river_ok_set(privermap, tile_index(ptile));
     log_debug("The tile at (%d, %d) has been marked as river in river_map.",
               TILE_XY(ptile));
 
@@ -941,6 +1009,9 @@ static void make_rivers(void)
 
   dbv_init(&rivermap.blocked, MAP_INDEX_SIZE);
   dbv_init(&rivermap.ok, MAP_INDEX_SIZE);
+  rivermap.ok_list = nullptr;
+  rivermap.ok_count = 0;
+  rivermap.ok_alloc = 0;
 
   /* The main loop in this function. */
   while (current_riverlength < desirable_riverlength
@@ -991,17 +1062,15 @@ static void make_rivers(void)
 
       /* Reset river map before making a new river. */
       dbv_clr_all(&rivermap.blocked);
-      dbv_clr_all(&rivermap.ok);
+      river_ok_clear(&rivermap);
 
       road_river = river_types[fc_rand(river_type_count)];
 
+      /* Tiles that have some other road-like extra are blocked. */
+      BV_CLR_ALL(rivermap.blocking_extras);
       extra_type_by_cause_iterate(EC_ROAD, oriver) {
         if (oriver != road_river) {
-          whole_map_iterate(&(wld.map), rtile) {
-            if (tile_has_extra(rtile, oriver)) {
-              dbv_set(&rivermap.blocked, tile_index(rtile));
-            }
-          } whole_map_iterate_end;
+          BV_SET(rivermap.blocking_extras, extra_index(oriver));
         }
       } extra_type_by_cause_iterate_end;
 
@@ -1010,24 +1079,32 @@ static void make_rivers(void)
 
       /* Try to make a river. If it is OK, apply it to the map. */
       if (make_river(&rivermap, ptile, road_river)) {
-        whole_map_iterate(&(wld.map), ptile1) {
-          if (dbv_isset(&rivermap.ok, tile_index(ptile1))) {
-            struct terrain *river_terrain = tile_terrain(ptile1);
+        int rn;
 
-            if (!terrain_has_flag(river_terrain, TER_CAN_HAVE_RIVER)) {
-              /* We have to change the terrain to put a river here. */
-              river_terrain = pick_terrain_by_flag(TER_CAN_HAVE_RIVER);
-              if (river_terrain != nullptr) {
-                tile_set_terrain(ptile1, river_terrain);
-              }
+        /* Apply the river tiles in ascending tile index order. This is the
+         * same order as when scanning the whole map, which matters as
+         * pick_terrain_by_flag() consumes random numbers. */
+        qsort(rivermap.ok_list, rivermap.ok_count, sizeof(int),
+              river_index_cmp);
+
+        for (rn = 0; rn < rivermap.ok_count; rn++) {
+          struct tile *ptile1 = index_to_tile(&(wld.map),
+                                              rivermap.ok_list[rn]);
+          struct terrain *river_terrain = tile_terrain(ptile1);
+
+          if (!terrain_has_flag(river_terrain, TER_CAN_HAVE_RIVER)) {
+            /* We have to change the terrain to put a river here. */
+            river_terrain = pick_terrain_by_flag(TER_CAN_HAVE_RIVER);
+            if (river_terrain != nullptr) {
+              tile_set_terrain(ptile1, river_terrain);
             }
-
-            tile_add_extra(ptile1, road_river);
-            current_riverlength++;
-            map_set_placed(ptile1);
-            log_debug("Applied a river to (%d, %d).", TILE_XY(ptile1));
           }
-        } whole_map_iterate_end;
+
+          tile_add_extra(ptile1, road_river);
+          current_riverlength++;
+          map_set_placed(ptile1);
+          log_debug("Applied a river to (%d, %d).", TILE_XY(ptile1));
+        }
       } else {
         log_debug("mapgen.c: A river failed. It might have gotten stuck "
                   "in a helix.");
@@ -1041,6 +1118,7 @@ static void make_rivers(void)
 
   dbv_free(&rivermap.blocked);
   dbv_free(&rivermap.ok);
+  free(rivermap.ok_list);
 
   destroy_placed_map();
 }
