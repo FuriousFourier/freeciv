@@ -123,7 +123,7 @@ struct trade_route_line {
 };
 
 /* A trade route line might need to be drawn in two parts. */
-static const int MAX_TRADE_ROUTE_DRAW_LINES = 2;
+#define MAX_TRADE_ROUTE_DRAW_LINES 2
 
 static struct timer *anim_timer = nullptr;
 
@@ -1604,15 +1604,13 @@ static void put_one_tile(struct canvas *pcanvas, enum mapview_layer layer,
   if (client_tile_get_known(ptile) != TILE_UNKNOWN
       || (editor_is_active() && editor_tile_is_selected(ptile))) {
     struct unit *punit = get_drawable_unit(tileset, ptile, citymode);
-    struct animation *anim = nullptr;
 
-    if (animation_list_size(animations) > 0) {
-      anim = animation_list_get(animations, 0);
-    }
+    if (punit != nullptr && animation_list_size(animations) > 0) {
+      struct animation *anim = animation_list_get(animations, 0);
 
-    if (anim != nullptr && punit != nullptr
-        && punit->id == anim->id) {
-      punit = nullptr;
+      if (punit->id == anim->id) {
+        punit = nullptr;
+      }
     }
 
     put_one_element(pcanvas, map_zoom, layer, ptile, nullptr, nullptr, punit,
@@ -1655,6 +1653,7 @@ static int trade_route_to_canvas_lines(const struct tile *ptile1,
 
   lines[1].width = -lines[0].width;
   lines[1].height = -lines[0].height;
+
   return 2;
 }
 
